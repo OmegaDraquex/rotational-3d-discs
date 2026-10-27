@@ -65,9 +65,9 @@ const contrastVal2 = document.getElementById("contrast-val-2");
 const invertToggle2 = document.getElementById("invert-toggle-2");
 const btnReset2 = document.getElementById("btn-reset-2");
 
+const modeInterleavedBtn = document.getElementById("mode-interleaved");
 const modeHalftoneBtn = document.getElementById("mode-halftone");
 const modeUltrathinBtn = document.getElementById("mode-ultrathin");
-const modeLithophaneBtn = document.getElementById("mode-lithophane");
 const modeHolesBtn = document.getElementById("mode-holes");
 const advSummaryLabel = document.getElementById("adv-summary-label");
 const colorModeMonoBtn = document.getElementById("colormode-mono");
@@ -220,17 +220,20 @@ function setupEventListeners() {
   });
   btnReset2.addEventListener("click", () => resetImageAdjustment(2, true));
 
-  // 2. Mode Toggle (Halftone Photo vs Ultra-Thin Litho vs Thick Litho vs Full Holes)
-  [modeHalftoneBtn, modeUltrathinBtn, modeLithophaneBtn, modeHolesBtn].forEach((btn) => {
+  // 2. Mode Toggle (Portrait Interleaved vs Halftone Photo vs Ultra-Thin Litho vs Full Holes)
+  [modeInterleavedBtn, modeHalftoneBtn, modeUltrathinBtn, modeHolesBtn].forEach((btn) => {
     btn.addEventListener("click", () => {
+      modeInterleavedBtn.classList.remove("active");
       modeHalftoneBtn.classList.remove("active");
       modeUltrathinBtn.classList.remove("active");
-      modeLithophaneBtn.classList.remove("active");
       modeHolesBtn.classList.remove("active");
       btn.classList.add("active");
       state.mode = btn.dataset.mode;
 
-      if (state.mode === "ultrathin") {
+      if (state.mode === "interleaved") {
+        thicknessInput.value = "1.8";
+        advSummaryLabel.textContent = "Advanced Print Settings (80mm, Interleaved Barrier Mask 1.8mm)";
+      } else if (state.mode === "ultrathin") {
         thicknessInput.value = "0.8";
         advSummaryLabel.textContent = "Advanced Print Settings (80mm, Asymmetric Back-Boost + Flush Rim)";
       } else if (state.mode === "halftone") {
