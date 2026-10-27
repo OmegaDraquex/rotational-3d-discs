@@ -594,6 +594,98 @@ def compute_angle_clarity_score(
     return score
 
 
+def find_optimal_angles_multimodal(
+    img1_small: np.ndarray,
+    img2_small: np.ndarray,
+    mode: str = "lithophane",
+) -> Tuple[float, float, float, float, List[Dict[str, Any]]]:
+    """
+    Two-Stage Multi-Modal Optimization Algorithm:
+      Stage 1 (Global Sweep): Probes 38 candidate angles across the entire valid
+              domain [-180°, -45°] and [+45°, +180°] (probe spacing ~7.5°).
+      Stage 2 (Local Maxima Refinement): Identifies all distinct local crests/peaks
+              where score >= neighbors, then runs bounded 1D continuous optimization
+              (Brent's parabolic interpolation) on the top local peaks to pinpoint
+              the exact continuous global optimum and local alternative modes.
+
+    Returns:
+      (global_best_angle, global_best_score, worst_angle, worst_score, local_maxima_list)
+    """
+    from scipy.optimize import minimize_scalar
+
+    # Stage 1: Coarse domain sampling across both negative and positive angular branches
+    neg_branch = np.linspace(-180.0, -45.0, 19)
+    pos_branch = np.linspace(45.0, 180.0, 19)
+    probe_grid = np.concatenate([neg_branch, pos_branch])
+
+    probe_scores = np.array([
+        compute_angle_clarity_score(img1_small, img2_small, float(a), mode=mode)
+        for a in probe_grid
+    ], dtype=np.float32)
+
+    # Detect local maxima in probe grid
+    n = len(probe_grid)
+    local_peaks: List[int] = []
+    for i in range(n):
+        val = probe_scores[i]
+        # Compare to left neighbor if within the same branch
+        is_left_ok = True
+        if i > 0 and (probe_grid[i] * probe_grid[i-1] > 0):
+            is_left_ok = val >= probe_scores[i-1]
+        # Compare to right neighbor if within the same branch
+        is_right_ok = True
+        if i < n - 1 and (probe_grid[i] * probe_grid[i+1] > 0):
+            is_right_ok = val >= probe_scores[i+1]
+
+        if is_left_ok and is_right_ok:
+            local_peaks.append(i)
+
+    # Sort detected peaks by score descending and keep top 4 candidate peaks
+    local_peaks.sort(key=lambda idx: probe_scores[idx], reverse=True)
+    top_peaks = local_peaks[:4] if local_peaks else [int(np.argmax(probe_scores))]
+
+    # Stage 2: Continuous refinement via Brent's method on each local peak bracket
+    refined_modes: List[Tuple[float, float]] = []
+    for idx in top_peaks:
+        center_ang = float(probe_grid[idx])
+        bracket_half = 8.0
+        low = max(-180.0 if center_ang < 0 else 45.0, center_ang - bracket_half)
+        high = min(-45.0 if center_ang < 0 else 180.0, center_ang + bracket_half)
+        if high - low < 1.0:
+            refined_modes.append((round(center_ang, 1), round(float(probe_scores[idx]), 1)))
+            continue
+
+        res = minimize_scalar(
+            lambda a: -compute_angle_clarity_score(img1_small, img2_small, float(a), mode=mode),
+            bounds=(low, high),
+            method="bounded",
+            options={"xatol": 0.5, "maxiter": 8},
+        )
+        opt_ang = round(float(res.x), 1)
+        opt_score = round(-float(res.fun), 1)
+        refined_modes.append((opt_ang, opt_score))
+
+    # Deduplicate modes that converged to the same angle (within 2 degrees)
+    unique_modes: List[Tuple[float, float]] = []
+    for ang, sc in sorted(refined_modes, key=lambda m: m[1], reverse=True):
+        if not any(abs(ang - u_ang) < 2.5 for u_ang, _ in unique_modes):
+            unique_modes.append((ang, sc))
+
+    best_ang, best_score = unique_modes[0]
+
+    # Global worst angle from the probe grid
+    worst_idx = int(np.argmin(probe_scores))
+    worst_ang = round(float(probe_grid[worst_idx]), 1)
+    worst_score = round(float(probe_scores[worst_idx]), 1)
+
+    modes_output = [
+        {"angle": ang, "score": sc, "rank": i + 1}
+        for i, (ang, sc) in enumerate(unique_modes)
+    ]
+
+    return best_ang, best_score, worst_ang, worst_score, modes_output
+
+
 def compare_angles(
     img1: np.ndarray,
     img2: np.ndarray,
@@ -601,15 +693,12 @@ def compare_angles(
     mode: str = "lithophane",
 ) -> Dict[str, Any]:
     """
-    Evaluates Clarity Scores across candidate angles (|theta| >= 45°) at a coarse 64x64
-    working resolution for instant response (< 0.3s), returning:
-      - default_90:  { angle: 90, score: ... }
-      - auto_best:   { angle: best_angle, score: ... }
-      - custom:      { angle: custom_angle, score: ... }
-      - worst:       { angle: worst_angle, score: ... }
+    Evaluates Clarity Scores using continuous multi-modal peak optimization:
+      - Uses two-stage global sweep + parabolic peak refinement to find the TRUE local and global maxima.
+      - Compares 90° (Default), Auto (Continuous Global Optimum), Custom, and Worst.
     """
     from PIL import Image
-    eval_size = 64
+    eval_size = 48
     img1_small = np.asarray(
         Image.fromarray(np.clip(img1 * 255.0, 0, 255).astype(np.uint8)).resize((eval_size, eval_size), Image.Resampling.BILINEAR),
         dtype=np.float32,
@@ -621,23 +710,18 @@ def compare_angles(
 
     valid_custom = validate_angle(custom_angle)
 
-    # Candidate sweep from 45° to 180° and -45° to -175° in 15° steps
-    candidates: List[float] = [
-        45.0, 60.0, 75.0, 90.0, 105.0, 120.0, 135.0, 150.0, 165.0, 180.0,
-        -45.0, -60.0, -75.0, -90.0, -105.0, -120.0, -135.0, -150.0, -165.0,
-    ]
-    if valid_custom not in candidates:
-        candidates.append(valid_custom)
+    score_90 = compute_angle_clarity_score(img1_small, img2_small, 90.0, mode=mode)
+    score_custom = compute_angle_clarity_score(img1_small, img2_small, valid_custom, mode=mode)
 
-    scores_map: Dict[float, float] = {}
-    for ang in candidates:
-        scores_map[ang] = compute_angle_clarity_score(img1_small, img2_small, ang, mode=mode)
+    best_ang, best_score, worst_ang, worst_score, local_maxima = find_optimal_angles_multimodal(
+        img1_small, img2_small, mode=mode
+    )
 
-    score_90 = scores_map[90.0]
-    score_custom = scores_map[valid_custom]
-
-    best_ang = max(scores_map.keys(), key=lambda a: scores_map[a])
-    worst_ang = min(scores_map.keys(), key=lambda a: scores_map[a])
+    # Ensure best is at least as good as 90° and custom
+    if score_90 > best_score:
+        best_ang, best_score = 90.0, score_90
+    if score_custom > best_score:
+        best_ang, best_score = valid_custom, score_custom
 
     return {
         "default_90": {
@@ -649,8 +733,8 @@ def compare_angles(
         "auto_best": {
             "label": "Auto (Optimal)",
             "angle": float(best_ang),
-            "score": scores_map[best_ang],
-            "description": f"Highest clarity & lowest cross-talk found at {best_ang:+.0f}°.",
+            "score": float(best_score),
+            "description": f"Refined local peak maximum with lowest cross-talk found at {best_ang:+.1f}°.",
         },
         "custom": {
             "label": f"Custom ({valid_custom:+.0f}°)",
@@ -661,7 +745,8 @@ def compare_angles(
         "worst": {
             "label": f"Worst ({worst_ang:+.0f}°)",
             "angle": float(worst_ang),
-            "score": scores_map[worst_ang],
-            "description": "Highest ghosting overlap & subpixel aliasing penalty.",
+            "score": worst_score,
+            "description": "Angle with highest rotational cross-talk and frequency conflict.",
         },
+        "local_maxima": local_maxima,
     }

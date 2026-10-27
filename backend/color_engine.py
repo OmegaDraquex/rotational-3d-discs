@@ -538,6 +538,81 @@ def compute_color_angle_clarity_score(
     return float(np.clip(round(raw_score, 1), 12.0, 99.0))
 
 
+def find_optimal_color_angles_multimodal(
+    img1_small: np.ndarray,
+    img2_small: np.ndarray,
+    palette_hex_list: List[str],
+    mode: str = "lithophane",
+) -> Tuple[float, float, float, float, List[Dict[str, Any]]]:
+    """
+    Two-Stage Multi-Modal Optimization for Multi-Color Bambu AMS:
+      Stage 1: Broad multi-branch probe across [-180°, -45°] and [45°, 180°].
+      Stage 2: Continuous parabolic refinement (Brent's method) on top local peaks.
+    """
+    from scipy.optimize import minimize_scalar
+
+    neg_branch = np.linspace(-180.0, -45.0, 19)
+    pos_branch = np.linspace(45.0, 180.0, 19)
+    probe_grid = np.concatenate([neg_branch, pos_branch])
+
+    probe_scores = np.array([
+        compute_color_angle_clarity_score(
+            img1_small, img2_small, float(a), palette_hex_list=palette_hex_list, mode=mode
+        )
+        for a in probe_grid
+    ], dtype=np.float32)
+
+    n = len(probe_grid)
+    local_peaks: List[int] = []
+    for i in range(n):
+        val = probe_scores[i]
+        is_left_ok = (i == 0 or (probe_grid[i] * probe_grid[i-1] <= 0) or val >= probe_scores[i-1])
+        is_right_ok = (i == n - 1 or (probe_grid[i] * probe_grid[i+1] <= 0) or val >= probe_scores[i+1])
+        if is_left_ok and is_right_ok:
+            local_peaks.append(i)
+
+    local_peaks.sort(key=lambda idx: probe_scores[idx], reverse=True)
+    top_peaks = local_peaks[:4] if local_peaks else [int(np.argmax(probe_scores))]
+
+    refined_modes: List[Tuple[float, float]] = []
+    for idx in top_peaks:
+        center_ang = float(probe_grid[idx])
+        bracket_half = 8.0
+        low = max(-180.0 if center_ang < 0 else 45.0, center_ang - bracket_half)
+        high = min(-45.0 if center_ang < 0 else 180.0, center_ang + bracket_half)
+        if high - low < 1.0:
+            refined_modes.append((round(center_ang, 1), round(float(probe_scores[idx]), 1)))
+            continue
+
+        res = minimize_scalar(
+            lambda a: -compute_color_angle_clarity_score(
+                img1_small, img2_small, float(a), palette_hex_list=palette_hex_list, mode=mode
+            ),
+            bounds=(low, high),
+            method="bounded",
+            options={"xatol": 0.5, "maxiter": 6},
+        )
+        refined_modes.append((round(float(res.x), 1), round(-float(res.fun), 1)))
+
+    unique_modes: List[Tuple[float, float]] = []
+    for ang, sc in sorted(refined_modes, key=lambda m: m[1], reverse=True):
+        if not any(abs(ang - u_ang) < 2.5 for u_ang, _ in unique_modes):
+            unique_modes.append((ang, sc))
+
+    best_ang, best_score = unique_modes[0]
+
+    worst_idx = int(np.argmin(probe_scores))
+    worst_ang = round(float(probe_grid[worst_idx]), 1)
+    worst_score = round(float(probe_scores[worst_idx]), 1)
+
+    modes_output = [
+        {"angle": ang, "score": sc, "rank": i + 1}
+        for i, (ang, sc) in enumerate(unique_modes)
+    ]
+
+    return best_ang, best_score, worst_ang, worst_score, modes_output
+
+
 def compare_color_angles(
     img1_rgb: np.ndarray,
     img2_rgb: np.ndarray,
@@ -546,10 +621,10 @@ def compare_color_angles(
     mode: str = "lithophane",
 ) -> Dict[str, Any]:
     """
-    Evaluates Color & Palette-Aware Clarity Scores across candidate angles (|theta| >= 45°),
-    returning `default_90`, `auto_best`, `custom`, and `worst`.
+    Evaluates Color & Palette-Aware Clarity Scores across continuous multi-modal local peaks,
+    returning `default_90`, `auto_best`, `custom`, `worst`, and `local_maxima`.
     """
-    eval_size = 48
+    eval_size = 40
     img1_small = np.asarray(
         Image.fromarray(np.clip(img1_rgb * 255.0, 0, 255).astype(np.uint8)).resize(
             (eval_size, eval_size), Image.Resampling.BILINEAR
@@ -564,45 +639,47 @@ def compare_color_angles(
     ) / 255.0
 
     valid_custom = validate_angle(custom_angle)
-    candidates: List[float] = [
-        45.0, 60.0, 75.0, 90.0, 105.0, 120.0, 135.0, 150.0, 165.0, 180.0,
-        -45.0, -60.0, -75.0, -90.0, -105.0, -120.0, -135.0, -150.0, -165.0,
-    ]
-    if valid_custom not in candidates:
-        candidates.append(valid_custom)
 
-    scores_map: Dict[float, float] = {}
-    for ang in candidates:
-        scores_map[ang] = compute_color_angle_clarity_score(
-            img1_small, img2_small, ang, palette_hex_list=palette_hex_list, mode=mode
-        )
+    score_90 = compute_color_angle_clarity_score(
+        img1_small, img2_small, 90.0, palette_hex_list=palette_hex_list, mode=mode
+    )
+    score_custom = compute_color_angle_clarity_score(
+        img1_small, img2_small, valid_custom, palette_hex_list=palette_hex_list, mode=mode
+    )
 
-    best_ang = max(scores_map.keys(), key=lambda a: scores_map[a])
-    worst_ang = min(scores_map.keys(), key=lambda a: scores_map[a])
+    best_ang, best_score, worst_ang, worst_score, local_maxima = find_optimal_color_angles_multimodal(
+        img1_small, img2_small, palette_hex_list=palette_hex_list, mode=mode
+    )
+
+    if score_90 > best_score:
+        best_ang, best_score = 90.0, score_90
+    if score_custom > best_score:
+        best_ang, best_score = valid_custom, score_custom
 
     return {
         "default_90": {
             "label": "90° (Default)",
             "angle": 90.0,
-            "score": scores_map[90.0],
+            "score": score_90,
             "description": f"Orthogonal 90° turn with {len(palette_hex_list)}-color AMS palette.",
         },
         "auto_best": {
             "label": "Auto (Optimal)",
             "angle": float(best_ang),
-            "score": scores_map[best_ang],
-            "description": f"Best color separation & lowest chromatic cross-talk at {best_ang:+.0f}°.",
+            "score": float(best_score),
+            "description": f"Continuous local peak optimum with lowest chromatic cross-talk at {best_ang:+.1f}°.",
         },
         "custom": {
             "label": f"Custom ({valid_custom:+.0f}°)",
             "angle": float(valid_custom),
-            "score": scores_map[valid_custom],
+            "score": score_custom,
             "description": "Your currently selected rotation offset.",
         },
         "worst": {
             "label": f"Worst ({worst_ang:+.0f}°)",
             "angle": float(worst_ang),
-            "score": scores_map[worst_ang],
+            "score": worst_score,
             "description": "Highest chromatic conflict & subpixel aliasing.",
         },
+        "local_maxima": local_maxima,
     }
