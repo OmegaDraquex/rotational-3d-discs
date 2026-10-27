@@ -1023,7 +1023,16 @@ function drawStackedOpticalDiscs(ctx, cx, cy, radius, rotDeg) {
     const t2 = d2[i] / 255.0;
 
     let combinedT;
-    if (state.mode === "holes" || state.mode === "halftone") {
+    if (state.mode === "interleaved") {
+      // Spatial Interleaved Barrier Mode:
+      // Where Disc 1 window is open (t1 > 0.35), light shines through with Disc 2's lithophane brightness!
+      // Where Disc 1 barrier wall is opaque (t1 <= 0.35), light is blocked behind the wall.
+      if (t1 > 0.35) {
+        combinedT = Math.min(1.0, t2 * 1.35);
+      } else {
+        combinedT = 0.04;
+      }
+    } else if (state.mode === "holes" || state.mode === "halftone") {
       // Direct product of aperture transmissions + subtle warm plastic glow
       combinedT = t1 * t2;
       if (combinedT > 0.22) {
