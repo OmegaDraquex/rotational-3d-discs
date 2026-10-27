@@ -12,7 +12,7 @@ const state = {
   invert2: false,
   baseSrc1: null,           // Raw data URL for live thumbnail contrast/invert preview
   baseSrc2: null,
-  mode: "halftone",         // "halftone" | "ultrathin" | "lithophane" | "holes"
+  mode: "interleaved",      // "interleaved" | "halftone" | "ultrathin" | "holes"
   colorMode: "monochrome",  // "monochrome" | "multicolor"
   numColors: 4,             // 2..8 filaments
   palette: [

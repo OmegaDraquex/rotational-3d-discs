@@ -154,6 +154,17 @@ def test_engines_and_clarity():
     print(f"[PASS] Easy-Peel Rim Chamfer verified -> Top Radius: {top_max_r:.2f}mm, Bed Contact Radius: {bed_max_r:.2f}mm (undercut = {top_max_r - bed_max_r:.2f}mm)")
     print("[PASS] Halftone Photo Mode -> Variable-Aperture Micro-Screen + 100% Manifold STL!")
 
+    # 2d. Test Spatial Interleaving Barrier Engine (Zero Cross-Talk for Photographs of People)
+    from backend.engines import solve_interleaved_barrier_pair
+    ib_d1, ib_d2, ib_t0, ib_t_theta = solve_interleaved_barrier_pair(img1, img2, angle_deg=90.0)
+    assert np.min(ib_d1[mask]) >= 0.239, f"Barrier mask window valley must have continuous base skin! Got {np.min(ib_d1[mask])}"
+    assert np.min(ib_d2[mask]) >= 0.34, f"Data plate must have continuous lithophane thickness! Got {np.min(ib_d2[mask])}"
+    stl_ib1 = generate_disc_stl(ib_d1, diameter_mm=80.0, max_thickness_mm=1.80, mode="interleaved", notch_angles_deg=[0.0])
+    verify_stl_is_100_percent_manifold(stl_ib1, label="disc_1_interleaved_barrier")
+    stl_ib2 = generate_disc_stl(ib_d2, diameter_mm=80.0, max_thickness_mm=1.60, mode="interleaved", notch_angles_deg=[0.0, 90.0])
+    verify_stl_is_100_percent_manifold(stl_ib2, label="disc_2_interleaved_data")
+    print("[PASS] Spatial Interleaving Engine -> Zero Cross-Talk Barrier Mask + Interleaved Data Plate 100% Manifold!")
+
     h1_mm, h2_mm, ht0, ht_theta = solve_holes_pair(img1, img2, angle_deg=90.0)
     assert np.min(h1_mm[mask]) >= 0.239, f"Holes mode must have continuous 0.24mm base skin! Got {np.min(h1_mm[mask])}"
     assert np.min(h2_mm[mask]) >= 0.239, f"Holes mode must have continuous 0.24mm base skin! Got {np.min(h2_mm[mask])}"

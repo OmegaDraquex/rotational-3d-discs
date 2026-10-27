@@ -36,6 +36,7 @@ from backend.engines import (
     solve_lithophane_pair,
     solve_halftone_photo_pair,
     solve_holes_pair,
+    solve_interleaved_barrier_pair,
     compare_angles,
 )
 from backend.color_engine import (
@@ -297,7 +298,18 @@ async def api_generate_preview(
     outer_mask = create_circular_mask(grid_res, margin_ratio=0.0)
     active_mask = create_circular_mask(grid_res, margin_ratio=0.05)
 
-    if mode == "holes":
+    if mode == "interleaved":
+        disc1_mm, disc2_mm, trans_0, trans_theta = solve_interleaved_barrier_pair(
+            arr1, arr2, angle_deg=effective_angle, t_min=t_min, t_max=t_max
+        )
+        # Disc 1 transmission: windows are open ~0.88, solid barrier walls block light (~0.03)
+        d1_trans = np.where(disc1_mm < 0.35, 0.90, 0.04).astype(np.float32)
+        d2_trans = np.clip(np.exp(-1.15 * disc2_mm), 0.08, 0.92).astype(np.float32)
+        d1_trans[outer_mask & (~active_mask)] = 0.04
+        d2_trans[outer_mask & (~active_mask)] = 0.08
+        d1_trans[~outer_mask] = 0.0
+        d2_trans[~outer_mask] = 0.0
+    elif mode == "holes":
         disc1_mm, disc2_mm, trans_0, trans_theta = solve_holes_pair(
             arr1, arr2, angle_deg=effective_angle, t_max=t_max
         )

@@ -377,6 +377,53 @@ def solve_multicolor_pair(
     u1 = np.full((size, size, 3), 0.22, dtype=np.float32)
     u2 = np.full((size, size, 3), 0.22, dtype=np.float32)
 
+    if mode == "interleaved":
+        # Spatial Interleaving Multi-Color Architecture:
+        # Disc 1: Aperture barrier mask (Slot 1 White translucent window floor + Slot 8/K Opaque barrier wall)
+        # Disc 2: Interleaved Multi-Color Data Plate (Window A = Photo 1 RGB colors, Window B = Photo 2 RGB colors)
+        from backend.engines import compute_barrier_wave
+        rim_mask = outer_circle & (~mask)
+        wave = compute_barrier_wave(size, angle_deg=angle_deg, m_sectors=18, radial_pitch_pixels=7.0)
+
+        # In Region A (wave >= 0), Disc 2 carries Photo 1 colors
+        # In Region B (wave < 0), Disc 2 carries Photo 2 colors
+        combined_d = np.where(wave[:, :, None] >= 0.0, target_d1, target_d2)
+        disc2_mm, slot2_map, d2_trans_rgb = _project_density_to_palette(
+            combined_d, palette_hex_list, t_min=t_min, t_max=t_max, mode="lithophane", is_back_disc=True
+        )
+
+        # Disc 1 (Barrier Mask):
+        # Open windows where wave > 0.12 (Slot 1 White 0.24mm floor);
+        # Barrier walls where wave <= 0.12 (Slot K/Darkest opaque filament at 1.80mm thickness!)
+        # Find darkest filament in palette for the barrier walls (highest slot or darkest color)
+        darkest_slot = len(palette_hex_list)  # typically the darkest slot
+        is_window = (wave > 0.12) & mask
+        disc1_mm = np.where(is_window, 0.24, 1.80).astype(np.float32)
+        slot1_map = np.where(is_window, 1, darkest_slot).astype(np.int32)
+        disc1_mm[rim_mask] = 1.80
+        slot1_map[rim_mask] = 1
+        disc1_mm[~outer_circle] = 0.0
+        slot1_map[~outer_circle] = 0
+
+        # High-clarity transmission simulation
+        d1_trans_rgb = np.where(is_window[:, :, None], np.array([0.90, 0.90, 0.90], dtype=np.float32), np.array([0.03, 0.03, 0.03], dtype=np.float32))
+        d1_rot_rgb = rotate_color_array(d1_trans_rgb, -angle_deg, fill_val=0.0)
+        reveal_0_rgb = np.clip(d1_trans_rgb * d2_trans_rgb * 1.35, 0.0, 1.0)
+        reveal_theta_rgb = np.clip(d1_rot_rgb * d2_trans_rgb * 1.35, 0.0, 1.0)
+        reveal_0_rgb[~outer_circle] = 0.0
+        reveal_theta_rgb[~outer_circle] = 0.0
+
+        return {
+            "disc1_mm": disc1_mm,
+            "disc2_mm": disc2_mm,
+            "slot1_map": slot1_map,
+            "slot2_map": slot2_map,
+            "d1_trans_rgb": d1_trans_rgb,
+            "d2_trans_rgb": d2_trans_rgb,
+            "reveal_0_rgb": reveal_0_rgb,
+            "reveal_theta_rgb": reveal_theta_rgb,
+        }
+
     for _ in range(num_iters):
         u1_rot = rotate_color_array(u1, -angle_deg, fill_val=0.0)
         est_u2_1 = target_d1 - u1

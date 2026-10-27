@@ -327,8 +327,8 @@ def _upsample_disc_maps(
     smoothing so lithophane surfaces and color regions are smooth and high-resolution instead of blocky!
     """
     n_in = thickness_map_mm.shape[0]
-    if mode in ("holes", "halftone"):
-        # In Holes and Halftone Photo modes, keep crisp aperture boundaries without cubic blurring
+    if mode in ("holes", "halftone", "interleaved"):
+        # In Holes, Halftone, and Interleaved Barrier modes, keep crisp window boundaries without cubic blurring
         scale_factor = max(1, target_res // n_in)
         if scale_factor > 1:
             z_up = np.repeat(np.repeat(thickness_map_mm, scale_factor, axis=0), scale_factor, axis=1)
