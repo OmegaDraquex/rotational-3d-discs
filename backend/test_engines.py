@@ -132,13 +132,31 @@ def test_engines_and_clarity():
     verify_stl_is_100_percent_manifold(stl_ultra2, label="disc_2_ultrathin_2notches")
     print("[PASS] Ultra-Thin Litho Mode -> Asymmetric Back-Boost + Flush Rim + 1-Notch/2-Notch Manifold STLs!")
 
-    # 2c. Test Halftone Photo Mode (Variable-Aperture Micro-Screen)
+    # 2c. Test Halftone Photo Mode (Variable-Aperture Micro-Screen with Continuous 0.24mm Base Skin)
     from backend.engines import solve_halftone_photo_pair
     ht_d1, ht_d2, htt0, htt_theta = solve_halftone_photo_pair(img1, img2, angle_deg=90.0, t_max=1.0)
+    assert np.min(ht_d1[mask]) >= 0.239, f"Halftone aperture valley must have at least 0.24mm base skin! Got {np.min(ht_d1[mask])}"
+    assert np.min(ht_d2[mask]) >= 0.239, f"Halftone aperture valley must have at least 0.24mm base skin! Got {np.min(ht_d2[mask])}"
     stl_ht1 = generate_disc_stl(ht_d1, diameter_mm=80.0, max_thickness_mm=1.0, mode="halftone", notch_angles_deg=[0.0])
     verify_stl_is_100_percent_manifold(stl_ht1, label="disc_1_halftone_1notch")
+
+    # Verify 0.6mm Easy-Peel Rim Chamfer on the bed contact layer (Z = 0)
+    num_tris = struct.unpack("<I", stl_ht1[80:84])[0]
+    stl_dtype = np.dtype([("normal", "<f4", (3,)), ("v0", "<f4", (3,)), ("v1", "<f4", (3,)), ("v2", "<f4", (3,)), ("attr", "<u2")])
+    recs = np.frombuffer(stl_ht1, dtype=stl_dtype, offset=84, count=num_tris)
+    all_verts = np.concatenate([recs["v0"], recs["v1"], recs["v2"]], axis=0)
+    bed_verts = all_verts[all_verts[:, 2] < 1e-3]
+    top_verts = all_verts[all_verts[:, 2] > 0.5]
+    bed_max_r = float(np.max(np.sqrt(bed_verts[:, 0] ** 2 + bed_verts[:, 1] ** 2)))
+    top_max_r = float(np.max(np.sqrt(top_verts[:, 0] ** 2 + top_verts[:, 1] ** 2)))
+    assert top_max_r >= 39.9, f"Expected top rim radius near 40mm, got {top_max_r}"
+    assert bed_max_r <= 39.5, f"Expected chamfered bed radius <= 39.5mm (0.6mm undercut), got {bed_max_r}"
+    print(f"[PASS] Easy-Peel Rim Chamfer verified -> Top Radius: {top_max_r:.2f}mm, Bed Contact Radius: {bed_max_r:.2f}mm (undercut = {top_max_r - bed_max_r:.2f}mm)")
     print("[PASS] Halftone Photo Mode -> Variable-Aperture Micro-Screen + 100% Manifold STL!")
+
     h1_mm, h2_mm, ht0, ht_theta = solve_holes_pair(img1, img2, angle_deg=90.0)
+    assert np.min(h1_mm[mask]) >= 0.239, f"Holes mode must have continuous 0.24mm base skin! Got {np.min(h1_mm[mask])}"
+    assert np.min(h2_mm[mask]) >= 0.239, f"Holes mode must have continuous 0.24mm base skin! Got {np.min(h2_mm[mask])}"
     # Check mean transmission in bright vs dark areas of img1 and img2
     bright1 = ht0[(img1 > 0.6) & mask].mean()
     dark1 = ht0[(img1 < 0.4) & mask].mean()

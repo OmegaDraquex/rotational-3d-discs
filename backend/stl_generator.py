@@ -127,12 +127,20 @@ def _fix_checkerboard_manifold(mask: np.ndarray) -> np.ndarray:
     return m
 
 
-def _build_smooth_vertex_coords(n: int, diameter_mm: float, solid_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _build_smooth_vertex_coords(
+    n: int,
+    diameter_mm: float,
+    solid_mask: np.ndarray,
+    chamfer_mm: float = 0.6,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Creates the (n+1, n+1) vertex coordinate grids VX, VY in millimeters.
-    Crucially, any vertex lying on the outer boundary of `solid_mask` (the disc perimeter)
-    is smoothly projected onto the exact circle radius `R = diameter_mm / 2` and smoothed
-    tangentially so the disc outer edge is a sleek circular cylinder instead of blocky steps!
+    Creates vertex coordinate grids VX, VY in millimeters:
+      - `vx_top, vy_top`: smoothly projected onto the exact circle radius R = diameter / 2
+        so the outer rim is a sleek, perfectly circular cylinder without blocky steps.
+      - `vx_bot, vy_bot`: bottom perimeter is inset by `chamfer_mm` (default 0.6mm) to create
+        a clean 45° bottom bevel/chamfer undercut on Layer 1. This allows a print scraper blade
+        or fingernail to easily catch under the edge and lift the disc off Smooth PEI plates
+        without bending or damaging the disc!
     """
     half_d = diameter_mm / 2.0
     lin = np.linspace(-half_d, half_d, n + 1, dtype=np.float32)
@@ -149,34 +157,55 @@ def _build_smooth_vertex_coords(n: int, diameter_mm: float, solid_mask: np.ndarr
     # Outer perimeter vertices have 1, 2, or 3 adjacent active cells AND lie near the outer rim
     rad = np.sqrt(vx ** 2 + vy ** 2)
     is_outer_boundary = (count_adj > 0) & (count_adj < 4) & (rad > half_d * 0.88)
-
-    # Project outer boundary vertices directly onto the circle of radius `half_d`
     safe_rad = np.where(rad < 1e-6, 1.0, rad)
-    vx[is_outer_boundary] = vx[is_outer_boundary] * (half_d / safe_rad[is_outer_boundary])
-    vy[is_outer_boundary] = vy[is_outer_boundary] * (half_d / safe_rad[is_outer_boundary])
 
-    return vx, vy
+    # Top boundary vertices projected onto exact circle radius half_d
+    vx_top = vx.copy()
+    vy_top = vy.copy()
+    vx_top[is_outer_boundary] = vx[is_outer_boundary] * (half_d / safe_rad[is_outer_boundary])
+    vy_top[is_outer_boundary] = vy[is_outer_boundary] * (half_d / safe_rad[is_outer_boundary])
+
+    # Recompute radius with projected top outer boundary
+    rad_top = np.sqrt(vx_top ** 2 + vy_top ** 2)
+    safe_rad_top = np.where(rad_top < 1e-6, 1.0, rad_top)
+
+    # Monotonic radial taper for the bottom contact layer (Z = 0) to create a smooth, easy-peel rim chamfer
+    # smoothly contracting the outer perimeter by chamfer_mm without any mesh folding
+    w_zone = 2.5  # mm transition width near outer edge
+    r0 = max(0.0, half_d - w_zone)
+    scale_factor = (w_zone - chamfer_mm) / w_zone
+
+    in_taper_zone = rad_top > r0
+    rad_bot = rad_top.copy()
+    rad_bot[in_taper_zone] = r0 + (rad_top[in_taper_zone] - r0) * scale_factor
+
+    bot_ratio = rad_bot / safe_rad_top
+    vx_bot = vx_top * bot_ratio
+    vy_bot = vy_top * bot_ratio
+
+    return vx_top, vy_top, vx_bot, vy_bot
 
 
 def _build_watertight_region_mesh(
     solid_mask: np.ndarray,
     z_top_cell: np.ndarray,
-    vx: np.ndarray,
-    vy: np.ndarray,
+    vx_top: np.ndarray,
+    vy_top: np.ndarray,
     smooth_top_surface: bool = True,
+    z_bottom_cell: Optional[np.ndarray] = None,
+    vx_bot: Optional[np.ndarray] = None,
+    vy_bot: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Builds a 100% watertight, 0-open-edge, 0-non-manifold-edge triangle mesh for the 2D boolean
     region `solid_mask` (n, n):
-      - When `smooth_top_surface=True` (Lithophane mode):
-        Computes shared corner vertex heights `VZ_top` (n+1, n+1) as the average of adjacent
+      - Top surface corner heights `VZ_top` (n+1, n+1) are computed as the average of adjacent
         active cells in `solid_mask`. Because adjacent cells share exact corner vertices `(vx, vy, vz)`,
         there are ZERO internal vertical step walls and ZERO open edges!
-      - When `smooth_top_surface=False` (Perforated Holes mode):
-        All solid cells have constant top height `max_thickness_mm`, so adjacent solid cells also
-        share exact top corner vertices `(vx, vy, max_thickness_mm)` with ZERO open edges!
-      - Perimeter vertical walls are emitted ONLY along true region boundary edges (where `solid_mask`
-        transitions from True to False), connecting top vertex `(vx, vy, vz)` to bottom `(vx, vy, 0)`.
+      - Bottom surface supports either flat bed contact (`z_bottom_cell=None`, Z=0 with easy-peel chamfer)
+        or elevated base support for layered multi-color glazes (`z_bottom_cell=Z_base(x,y)`).
+      - Perimeter boundary walls connect top vertices to bottom vertices strictly where `solid_mask`
+        transitions from True to False, closing all borders with 0 open edges!
     """
     mask = _fix_checkerboard_manifold(solid_mask)
     ys, xs = np.nonzero(mask)
@@ -185,7 +214,12 @@ def _build_watertight_region_mesh(
 
     n = mask.shape[0]
 
-    # Compute corner vertex height VZ (n+1, n+1) averaged ONLY over active cells in `mask`
+    if vx_bot is None:
+        vx_bot = vx_top
+    if vy_bot is None:
+        vy_bot = vy_top
+
+    # Compute corner vertex height VZ_top (n+1, n+1) averaged ONLY over active cells in `mask`
     m_pad = np.pad(mask, pad_width=1, mode="constant", constant_values=False)
     z_pad = np.pad(np.where(mask, z_top_cell, 0.0), pad_width=1, mode="constant", constant_values=0.0)
 
@@ -200,32 +234,48 @@ def _build_watertight_region_mesh(
     z_se = z_pad[1:, 1:]
 
     denom = np.maximum(1.0, c_nw + c_ne + c_sw + c_se)
-    vz = (z_nw + z_ne + z_sw + z_se) / denom
+    vz_top = (z_nw + z_ne + z_sw + z_se) / denom
 
-    # Extract the 4 corner vertices for each active cell (y, x):
-    # Top-Left (NW): (y, x), Top-Right (NE): (y, x+1), Bottom-Right (SE): (y+1, x+1), Bottom-Left (SW): (y+1, x)
-    # Note: In our coordinate system, row `y` has larger Y than row `y+1` (vy decreases with y).
-    # Let's define:
-    #   p00 = (y+1, x)   [SW: x0, y0]
-    #   p10 = (y+1, x+1) [SE: x1, y0]
-    #   p11 = (y,   x+1) [NE: x1, y1]
-    #   p01 = (y,   x)   [NW: x0, y1]
-    x00, y00, z00 = vx[ys + 1, xs], vy[ys + 1, xs], vz[ys + 1, xs]
-    x10, y10, z10 = vx[ys + 1, xs + 1], vy[ys + 1, xs + 1], vz[ys + 1, xs + 1]
-    x11, y11, z11 = vx[ys, xs + 1], vy[ys, xs + 1], vz[ys, xs + 1]
-    x01, y01, z01 = vx[ys, xs], vy[ys, xs], vz[ys, xs]
+    # Compute corner vertex height VZ_bottom (n+1, n+1)
+    if z_bottom_cell is not None:
+        zb_pad = np.pad(np.where(mask, z_bottom_cell, 0.0), pad_width=1, mode="constant", constant_values=0.0)
+        zb_nw = zb_pad[:-1, :-1]
+        zb_ne = zb_pad[:-1, 1:]
+        zb_sw = zb_pad[1:, :-1]
+        zb_se = zb_pad[1:, 1:]
+        vz_bottom = (zb_nw + zb_ne + zb_sw + zb_se) / denom
+    else:
+        vz_bottom = np.zeros_like(vz_top)
 
-    zb = np.zeros_like(z00)
+    # For vertices touching the bed (Z < 0.05mm), use the easy-peel chamfered coordinates (vx_bot, vy_bot).
+    # For elevated surfaces (Z >= 0.05mm), use full radius coordinates (vx_top, vy_top).
+    is_bed_contact = vz_bottom < 0.05
+    xb_grid = np.where(is_bed_contact, vx_bot, vx_top)
+    yb_grid = np.where(is_bed_contact, vy_bot, vy_top)
 
-    p00_t = np.stack([x00, y00, z00], axis=-1)
-    p10_t = np.stack([x10, y10, z10], axis=-1)
-    p11_t = np.stack([x11, y11, z11], axis=-1)
-    p01_t = np.stack([x01, y01, z01], axis=-1)
+    # Extract 4 corner vertices for each active cell (ys, xs)
+    # NW: (y, x), NE: (y, x+1), SE: (y+1, x+1), SW: (y+1, x)
+    # Top vertices:
+    x00_t, y00_t, z00_t = vx_top[ys + 1, xs], vy_top[ys + 1, xs], vz_top[ys + 1, xs]
+    x10_t, y10_t, z10_t = vx_top[ys + 1, xs + 1], vy_top[ys + 1, xs + 1], vz_top[ys + 1, xs + 1]
+    x11_t, y11_t, z11_t = vx_top[ys, xs + 1], vy_top[ys, xs + 1], vz_top[ys, xs + 1]
+    x01_t, y01_t, z01_t = vx_top[ys, xs], vy_top[ys, xs], vz_top[ys, xs]
 
-    p00_b = np.stack([x00, y00, zb], axis=-1)
-    p10_b = np.stack([x10, y10, zb], axis=-1)
-    p11_b = np.stack([x11, y11, zb], axis=-1)
-    p01_b = np.stack([x01, y01, zb], axis=-1)
+    # Bottom vertices:
+    x00_b, y00_b, z00_b = xb_grid[ys + 1, xs], yb_grid[ys + 1, xs], vz_bottom[ys + 1, xs]
+    x10_b, y10_b, z10_b = xb_grid[ys + 1, xs + 1], yb_grid[ys + 1, xs + 1], vz_bottom[ys + 1, xs + 1]
+    x11_b, y11_b, z11_b = xb_grid[ys, xs + 1], yb_grid[ys, xs + 1], vz_bottom[ys, xs + 1]
+    x01_b, y01_b, z01_b = xb_grid[ys, xs], yb_grid[ys, xs], vz_bottom[ys, xs]
+
+    p00_t = np.stack([x00_t, y00_t, z00_t], axis=-1)
+    p10_t = np.stack([x10_t, y10_t, z10_t], axis=-1)
+    p11_t = np.stack([x11_t, y11_t, z11_t], axis=-1)
+    p01_t = np.stack([x01_t, y01_t, z01_t], axis=-1)
+
+    p00_b = np.stack([x00_b, y00_b, z00_b], axis=-1)
+    p10_b = np.stack([x10_b, y10_b, z10_b], axis=-1)
+    p11_b = np.stack([x11_b, y11_b, z11_b], axis=-1)
+    p01_b = np.stack([x01_b, y01_b, z01_b], axis=-1)
 
     tris = []
 
@@ -237,9 +287,7 @@ def _build_watertight_region_mesh(
     tris.append(np.stack([p00_b, p11_b, p10_b], axis=1))
     tris.append(np.stack([p00_b, p01_b, p11_b], axis=1))
 
-    # 3. Boundary vertical walls ONLY where neighbor cell is False!
-    # Because boundary walls use the exact same corner vertices (p00_t, p10_t, p00_b, p10_b, etc.),
-    # every boundary edge of the top surface and bottom surface is closed with 0 open edges!
+    # 3. Boundary vertical / sloped walls ONLY where neighbor cell is False!
     has_north = m_pad[ys, xs + 1]      # neighbor at (y-1, x)
     has_south = m_pad[ys + 2, xs + 1]  # neighbor at (y+1, x)
     has_west = m_pad[ys + 1, xs]       # neighbor at (y, x-1)
@@ -317,9 +365,11 @@ def generate_disc_stl(
 ) -> bytes:
     """
     Generates a high-resolution, 100% manifold (0 open edges, 0 non-manifold edges) binary STL
-    of a circular disc of `diameter_mm`, including functional inward alignment notches on the outer rim:
+    of a circular disc of `diameter_mm`, including functional inward alignment notches on the outer rim
+    and an easy-peel 0.6mm chamfer undercut on the bottom bed perimeter:
       - Disc 1 has ONE notch at 0° (top 12 o'clock).
       - Disc 2 has TWO notches: one at 0° (Image 1 alignment) and one at +angle_deg (Image 2 alignment).
+      - Base skin: Continuous 0.24mm White PLA floor across the entire disc prevents tearing/shredding!
     """
     z_up, _ = _upsample_disc_maps(thickness_map_mm, None, mode=mode, target_res=280)
     n = z_up.shape[0]
@@ -335,20 +385,24 @@ def generate_disc_stl(
 
     # Flush rim thickness matches the disc's active max height so stacked discs have ZERO air gap!
     active_max = float(np.max(thickness_map_mm)) if np.max(thickness_map_mm) > 0.2 else max_thickness_mm
-    min_floor = 0.16 if mode == "ultrathin" else 0.40
+    base_floor = 0.24  # Continuous 0.24mm (2-layer) White PLA base skin across entire circle
 
     z_up[rim_mask] = active_max
     z_up[~outer_circle] = 0.0
 
-    if mode in ("holes", "halftone"):
-        solid_mask = (z_up > 0.1) & outer_circle
-    else:
-        z_up[active_circle] = np.clip(z_up[active_circle], min_floor, active_max)
-        solid_mask = outer_circle.copy()
+    # Ensure continuous 0.24mm floor across outer_circle so Layer 1 & 2 are 100% solid
+    z_up[outer_circle] = np.maximum(base_floor, z_up[outer_circle])
+    solid_mask = outer_circle.copy()
 
-    vx, vy = _build_smooth_vertex_coords(n, diameter_mm, raw_circle)
+    vx_top, vy_top, vx_bot, vy_bot = _build_smooth_vertex_coords(n, diameter_mm, raw_circle, chamfer_mm=0.6)
     triangles = _build_watertight_region_mesh(
-        solid_mask, z_up, vx, vy, smooth_top_surface=(mode not in ("holes", "halftone"))
+        solid_mask,
+        z_up,
+        vx_top,
+        vy_top,
+        smooth_top_surface=(mode not in ("holes", "halftone")),
+        vx_bot=vx_bot,
+        vy_bot=vy_bot,
     )
     return _triangles_to_binary_stl(triangles, header_text=f"RotationalDisc_{mode}")
 
@@ -365,13 +419,22 @@ def generate_slot_stl(
 ) -> bytes:
     """
     Generates a 100% watertight, 0-open-edge, 0-non-manifold-edge binary STL mesh for a single
-    Bambu AMS filament slot `target_slot` (1..K), including functional rim alignment notches.
+    Bambu AMS filament slot `target_slot` (1..K), implementing the Layered Color Glaze architecture:
+      - Slot 1 (Jade White PLA):
+        Acts as the continuous structural base & optical diffuser. Spans the entire disc from Z=0.0
+        up to Z_base(x, y), guaranteeing 100% solid first 2 layers (0 switches on Layer 1) and
+        smooth bed adhesion with the easy-peel rim chamfer.
+      - Slots 2..K (Colored Filaments):
+        Print ONLY as a thin top color glaze (0.24mm thick, exactly 2 layers at 0.12mm) elevated
+        directly on top of Slot 1's white pedestal. This ensures colored filaments act as vibrant
+        translucent filters without ever becoming opaque, light-blocking slabs!
     """
+    base_floor = 0.24       # Continuous White PLA base skin (mm)
+    glaze_thickness = 0.24  # Glaze thickness (2 layers at 0.12mm)
     active_max = float(np.max(thickness_map_mm)) if np.max(thickness_map_mm) > 0.2 else max_thickness_mm
-    min_floor = 0.16 if mode == "ultrathin" else 0.40
 
     if pre_upsampled is not None:
-        z_up, s_up, vx, vy, outer_circle = pre_upsampled
+        z_up, s_up, vx_top, vy_top, vx_bot, vy_bot, outer_circle, rim_mask = pre_upsampled
     else:
         z_up, s_up = _upsample_disc_maps(thickness_map_mm, slot_map, mode=mode, target_res=260)
         n = z_up.shape[0]
@@ -385,17 +448,57 @@ def generate_slot_stl(
         rim_mask = outer_circle & (~active_circle)
         z_up[rim_mask] = active_max
         s_up[rim_mask] = 1
-        vx, vy = _build_smooth_vertex_coords(n, diameter_mm, raw_circle)
+        z_up[outer_circle] = np.maximum(base_floor, z_up[outer_circle])
+        vx_top, vy_top, vx_bot, vy_bot = _build_smooth_vertex_coords(n, diameter_mm, raw_circle, chamfer_mm=0.6)
 
-    slot_mask = (s_up == target_slot) & (z_up > 0.05) & outer_circle
-    if not np.any(slot_mask):
-        return _triangles_to_binary_stl(np.zeros((0, 3, 3), dtype=np.float32), header_text=f"AMS_Slot_{target_slot}")
+    if target_slot == 1:
+        # Slot 1 is the structural Jade White base & relief across the ENTIRE disc
+        slot_mask = outer_circle.copy()
+        # Bottom is on the build plate (Z = 0.0) with easy-peel chamfer
+        z_bottom = np.zeros_like(z_up)
+        # Top: where slot == 1 or rim, it extends to full height z_up;
+        # where colored glazes sit (s_up >= 2), Slot 1 rises to support the glaze pedestal
+        z_top = np.where(
+            (s_up == 1) | rim_mask,
+            z_up,
+            np.maximum(base_floor, z_up - glaze_thickness),
+        )
+        z_top[rim_mask] = active_max
+        triangles = _build_watertight_region_mesh(
+            slot_mask,
+            z_top,
+            vx_top,
+            vy_top,
+            smooth_top_surface=(mode not in ("holes", "halftone")),
+            z_bottom_cell=z_bottom,
+            vx_bot=vx_bot,
+            vy_bot=vy_bot,
+        )
+        return _triangles_to_binary_stl(triangles, header_text="AMS_Slot_1_WhiteBase")
 
-    z_clamped = np.clip(z_up, min_floor, active_max)
-    triangles = _build_watertight_region_mesh(
-        slot_mask, z_clamped, vx, vy, smooth_top_surface=(mode not in ("holes", "halftone"))
-    )
-    return _triangles_to_binary_stl(triangles, header_text=f"AMS_Slot_{target_slot}")
+    else:
+        # Slots 2..K are thin color glazes elevated on top of the white base pedestal
+        slot_mask = (s_up == target_slot) & (z_up > 0.05) & outer_circle
+        if not np.any(slot_mask):
+            return _triangles_to_binary_stl(np.zeros((0, 3, 3), dtype=np.float32), header_text=f"AMS_Slot_{target_slot}")
+
+        # Bottom sits directly on top of Slot 1's pedestal
+        z_bottom = np.maximum(base_floor, z_up - glaze_thickness)
+        # Top is the outer surface of the disc
+        z_top = np.maximum(z_bottom + 0.12, z_up)
+
+        # Elevated surface: no bed contact, so bottom vertices use vx_top, vy_top
+        triangles = _build_watertight_region_mesh(
+            slot_mask,
+            z_top,
+            vx_top,
+            vy_top,
+            smooth_top_surface=(mode not in ("holes", "halftone")),
+            z_bottom_cell=z_bottom,
+            vx_bot=vx_top,
+            vy_bot=vy_top,
+        )
+        return _triangles_to_binary_stl(triangles, header_text=f"AMS_Slot_{target_slot}_Glaze")
 
 
 def package_both_stls_zip(
@@ -449,17 +552,19 @@ def package_both_stls_zip(
 
             z1_up[rim1] = active_max1
             s1_up[rim1] = 1
+            z1_up[outer1] = np.maximum(0.24, z1_up[outer1])
             z1_up[~outer1] = 0.0
             s1_up[~outer1] = 0
 
             z2_up[rim2] = active_max2
             s2_up[rim2] = 1
+            z2_up[outer2] = np.maximum(0.24, z2_up[outer2])
             z2_up[~outer2] = 0.0
             s2_up[~outer2] = 0
 
-            vx, vy = _build_smooth_vertex_coords(n, diameter_mm, raw_circle)
-            pre1 = (z1_up, s1_up, vx, vy, outer1)
-            pre2 = (z2_up, s2_up, vx, vy, outer2)
+            vx_top, vy_top, vx_bot, vy_bot = _build_smooth_vertex_coords(n, diameter_mm, raw_circle, chamfer_mm=0.6)
+            pre1 = (z1_up, s1_up, vx_top, vy_top, vx_bot, vy_bot, outer1, rim1)
+            pre2 = (z2_up, s2_up, vx_top, vy_top, vx_bot, vy_bot, outer2, rim2)
 
             ams_lines = ["\nBambu Lab AMS Multi-Color Filament Slot Mapping:", "-" * 50]
             for p_item in palette_info:
@@ -487,6 +592,8 @@ def package_both_stls_zip(
             ams_lines.append("  2. Click 'Yes' when asked: 'Load these files as a single object with multiple parts?'")
             ams_lines.append("  3. Assign each part (slot_1 .. slot_K) to its matching AMS Filament Slot above.")
             ams_lines.append("  4. Repeat for 'bambu_ams_disc_2/'.")
+            ams_lines.append("  Note: Slot 1 (Jade White) forms the continuous bottom skin across the whole plate,")
+            ams_lines.append("        so Layer 1 prints in 100% White with ZERO filament swaps on the bed!")
             ams_section = "\n".join(ams_lines) + "\n"
 
         readme_content = f"""Rotational Dual-Image 3D Discs

@@ -53,9 +53,12 @@ def solve_lithophane_pair(
     When `ultra_thin=True`:
       - Pre-compensates both images with multi-scale local contrast enhancement & edge sharpening
         to counteract lateral light diffusion in PLA.
-      - Uses an aggressive dynamic range curve [0.01, 0.98] with t_min = 0.16 mm (1 single layer)
-        and t_max = 0.80 mm for the inner optical membrane while keeping a rigid 1.60 mm outer rim!
+      - Uses an aggressive dynamic range curve [0.01, 0.98] with t_min = 0.24 mm (solid 2-layer base skin)
+        and t_max = 0.80 mm for the inner optical membrane while keeping a rigid outer rim!
     """
+    if ultra_thin and t_min < 0.24:
+        t_min = 0.24  # Continuous 2-layer (0.24mm) white base skin to prevent tearing/shredding
+
     size = img1.shape[0]
     mask = create_circular_mask(size, margin_ratio=0.05)
 
@@ -157,16 +160,14 @@ def solve_halftone_photo_pair(
     Solves the fundamental diffusion problem of stacked lithophanes while preserving
     photographic continuous grayscale gradients!
 
-    How it works:
-      1. First solves the continuous rotational density fields `u1(y, x)` and `u2(y, x)`
-         with local contrast enhancement (`apply_photo_anti_diffusion_boost`).
-      2. Modulates `u1` and `u2` against an orthogonal 2D sinusoidal halftone screen
-         (period = 4 grid cells -> ~1.6mm physical cell pitch, easily resolved by a 0.4mm nozzle).
-      3. Where `u(y, x)` exceeds the halftone screen wave, the plate is solid opaque thickness `t_max`;
-         where `u(y, x)` is below the screen wave, it opens an UNSCATTERED micro-aperture hole (0.0 mm)
-         supported by a continuous micro-bridge lattice so every island stays 100% connected!
-      4. Because light passes through open air in the variable-sized apertures, Disc 2's rays
-         travel straight through Disc 1's apertures with ZERO plastic diffusion blur!
+    Improvements for 3D Print Reliability & Bed Adhesion:
+      1. Continuous 0.24mm White Base Skin:
+         Apertures thin down to a continuous 0.24mm (2-layer) translucent White PLA floor
+         instead of empty air (0.0mm). This ensures Layer 1 and Layer 2 are 100% solid across
+         the entire plate: 0 isolated micro-dots, zero nozzle dragging, zero lattice shredding!
+      2. Coarser Pitch & 2-Perimeter Struts:
+         Uses a 2.0mm cell pitch (5 grid pixels on 200x200) with 0.80mm wide struts (2 pixels,
+         corresponding to 2 clean nozzle perimeters) anchored to the solid 0.24mm base skin.
     """
     size = img1.shape[0]
     mask = create_circular_mask(size, margin_ratio=0.05)
@@ -174,7 +175,7 @@ def solve_halftone_photo_pair(
     rim_mask = outer_circle & (~mask)
 
     # Solve continuous rotational density fields u1, u2 in [0, 0.64]
-    _, _, _, _ = solve_lithophane_pair(img1, img2, angle_deg, t_min=0.16, t_max=t_max, num_iters=28, ultra_thin=True)
+    _, _, _, _ = solve_lithophane_pair(img1, img2, angle_deg, t_min=0.24, t_max=t_max, num_iters=28, ultra_thin=True)
 
     work1 = apply_photo_anti_diffusion_boost(img1, mask)
     work2 = apply_photo_anti_diffusion_boost(img2, mask)
@@ -196,37 +197,40 @@ def solve_halftone_photo_pair(
     op1 = np.clip(u1 / 0.56, 0.0, 1.0)
     op2 = np.clip((u2 / 0.56) * 1.12, 0.0, 1.0)  # Boost back disc slightly
 
-    # Build rotationally-symmetric 2D halftone carrier wave (period = 4 pixels)
+    # Build rotationally-symmetric 2D halftone carrier wave (period = 5 pixels -> 2.0mm pitch on 80mm disc)
     yy, xx = np.mgrid[:size, :size]
-    # Orthogonal cosine screen centered in each 4x4 cell
-    wx = np.cos(2.0 * math.pi * (xx - size / 2.0) / 4.0)
-    wy = np.cos(2.0 * math.pi * (yy - size / 2.0) / 4.0)
-    # Screen threshold in [0.12, 0.88]
-    screen1 = 0.50 + 0.38 * (0.5 * (wx + wy))
-    # Phase-shifted complementary screen for Disc 2 so holes interlock cleanly
-    wx2 = np.cos(2.0 * math.pi * (xx - size / 2.0 + 1.0) / 4.0)
-    wy2 = np.cos(2.0 * math.pi * (yy - size / 2.0 + 1.0) / 4.0)
-    screen2 = 0.50 + 0.38 * (0.5 * (wx2 + wy2))
+    # Orthogonal cosine screen centered in each 5x5 cell
+    wx = np.cos(2.0 * math.pi * (xx - size / 2.0) / 5.0)
+    wy = np.cos(2.0 * math.pi * (yy - size / 2.0) / 5.0)
+    # Screen threshold in [0.15, 0.85]
+    screen1 = 0.50 + 0.35 * (0.5 * (wx + wy))
+    # Phase-shifted complementary screen for Disc 2 so apertures interlock cleanly
+    wx2 = np.cos(2.0 * math.pi * (xx - size / 2.0 + 1.25) / 5.0)
+    wy2 = np.cos(2.0 * math.pi * (yy - size / 2.0 + 1.25) / 5.0)
+    screen2 = 0.50 + 0.35 * (0.5 * (wx2 + wy2))
 
-    # Structural micro-grid backbone: every 4th row/col has a 1-pixel strut so all solid features
-    # are 100% physically connected to the outer rim (zero floating islands on the print bed!)
-    strut_grid = ((xx % 4 == 0) | (yy % 4 == 0)) & mask
+    # Structural micro-grid backbone: 2-pixel wide struts (0.80mm wide -> exactly 2 nozzle perimeters)
+    # anchored directly to the 0.24mm solid base skin
+    strut_grid = ((xx % 5 < 2) | (yy % 5 < 2)) & mask
 
     solid1 = ((op1 >= screen1) | strut_grid) & mask
     solid2 = ((op2 >= screen2) | strut_grid) & mask
 
-    # Give solid areas thickness proportional to op1/op2 in [0.48mm, t_max] and holes 0.0mm!
-    disc1_mm = np.where(solid1, np.clip(0.45 + op1 * (t_max - 0.45), 0.45, t_max), 0.0).astype(np.float32)
-    disc2_mm = np.where(solid2, np.clip(0.45 + op2 * (t_max - 0.45), 0.45, t_max), 0.0).astype(np.float32)
+    # Base skin is 0.24mm White PLA (continuous solid floor across entire circle)
+    # Solid features rise from 0.48mm to t_max on top of the 0.24mm floor
+    base_skin_mm = 0.24
+    disc1_mm = np.where(solid1, np.clip(0.48 + op1 * (t_max - 0.48), 0.48, t_max), base_skin_mm).astype(np.float32)
+    disc2_mm = np.where(solid2, np.clip(0.48 + op2 * (t_max - 0.48), 0.48, t_max), base_skin_mm).astype(np.float32)
 
     disc1_mm[rim_mask] = max(1.2, t_max)
     disc2_mm[rim_mask] = max(1.2, t_max)
     disc1_mm[~outer_circle] = 0.0
     disc2_mm[~outer_circle] = 0.0
 
-    # Compute local transmission: open holes pass 100% light (1.0), solid plastic passes attenuated light
-    t_map1 = np.where(disc1_mm < 0.05, 1.0, np.clip(1.0 - 0.82 * op1, 0.05, 0.45)).astype(np.float32)
-    t_map2 = np.where(disc2_mm < 0.05, 1.0, np.clip(1.0 - 0.85 * op2, 0.04, 0.42)).astype(np.float32)
+    # Compute local optical transmission:
+    # 0.24mm translucent White PLA transmits ~88% light; thicker solid areas attenuate down to 5-35%
+    t_map1 = np.where(disc1_mm <= 0.26, 0.88, np.clip(1.0 - 0.80 * op1, 0.06, 0.45)).astype(np.float32)
+    t_map2 = np.where(disc2_mm <= 0.26, 0.88, np.clip(1.0 - 0.82 * op2, 0.05, 0.42)).astype(np.float32)
     t_map1_rot = rotate_image_array(t_map1, -angle_deg, fill_val=0.0)
 
     trans_0 = np.clip(t_map1 * t_map2, 0.0, 1.0)
@@ -348,12 +352,14 @@ def solve_holes_pair(
                 h1[2 * y + dy, 2 * x + dx] = 1.0
 
     # Convert hole maps (1=hole, 0=solid) to physical thickness maps in mm:
-    # Open hole = 0.0 mm, Solid block = t_max (2.0 mm)
+    # Open hole = 0.24 mm (continuous White PLA base skin to prevent tearing/shredding),
+    # Solid block = t_max (2.0 mm)
     outer_circle = create_circular_mask(size, margin_ratio=0.0)
     rim_mask = outer_circle & (~mask)
 
-    disc1_mm = np.where(h1 >= 0.5, 0.0, t_max).astype(np.float32)
-    disc2_mm = np.where(h2 >= 0.5, 0.0, t_max).astype(np.float32)
+    base_skin_mm = 0.24
+    disc1_mm = np.where(h1 >= 0.5, base_skin_mm, t_max).astype(np.float32)
+    disc2_mm = np.where(h2 >= 0.5, base_skin_mm, t_max).astype(np.float32)
 
     disc1_mm[rim_mask] = t_max
     disc2_mm[rim_mask] = t_max

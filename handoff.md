@@ -57,6 +57,26 @@ The current application is running on FastAPI with a modern vanilla HTML/CSS/JS 
 - Added an experimental **Halftone Photo Mode** (variable micro-apertures on an orthogonal grid) and **Asymmetric Back-Disc Boost** (Disc 2 given 1.35mm relief, Disc 1 given 0.54mm relief with flush rims).
 - User printed this version in multi-color on a Smooth PEI plate and provided photos (`media_1793060219893_fab3bbf8.jpg` and `media_1793060224415_1dbae3b3.jpg`).
 
+### Iteration 8: Comprehensive Print Failure Fix Implementation (Complete & Verified)
+Based on the approved diagnosis and fix plan (`print_failure_diagnosis_and_fix_plan.md`), the following fixes were engineered and verified:
+1. **Continuous 0.24mm White Base Skin Across All Modes**:
+   - In `backend/engines.py` & `backend/stl_generator.py`, apertures and valleys thin down to a continuous $Z = 0.24\text{ mm}$ (2-layer at 0.12mm) White PLA floor across the entire circular disc instead of empty air ($Z = 0$).
+   - Guarantees Layers 1 and 2 on the Smooth PEI sheet are 100% solid White PLA across all 80mm: ZERO isolated dots on the bed, zero nozzle dragging, and zero lattice tearing when peeling off.
+2. **0.60mm Easy-Peel Rim Chamfer Undercut**:
+   - Implemented a monotonic radial contraction in `_build_smooth_vertex_coords` for the bed contact layer ($Z = 0$).
+   - Bed contact radius is strictly $39.40\text{ mm}$ (undercut by $0.60\text{ mm}$ relative to the top rim at $40.00\text{ mm}$).
+   - Creates a tactile bottom bevel all the way around the outer perimeter so a fingernail or print scraper blade slips directly under the disc to pop it off Smooth PEI without bending or tearing.
+3. **Layered Color Glaze Architecture (Bambu AMS Multi-Color)**:
+   - In `backend/stl_generator.py`, Slot 1 (Jade White PLA) forms the continuous bottom skin across the entire plate plus the base pedestal ($0.24\text{ mm}$ to $1.20\text{ mm}$).
+   - Colored filaments (Slots 2..K) print strictly as thin optical glazes ($0.24\text{ mm}$ thick) elevated directly on top of Slot 1's pedestal.
+   - Slicer result: Layer 1 & 2 have ZERO filament swaps on the bed, and colored filaments act as vibrant translucent chromatic filters rather than opaque light-blocking bricks!
+4. **Auto-Palette Dead-Opaque Black Exclusion**:
+   - In `backend/color_engine.py`, the auto-palette optimizer caps absorption so filament transmittance is $\ge 18\%$, replacing dead-opaque Charcoal Black with vibrant translucent primaries (e.g. Royal Purple, Deep Slate, Cobalt Blue).
+5. **Coarser 2.0mm Cell Pitch with 0.80mm (2-Perimeter) Struts**:
+   - In `backend/engines.py`, Halftone mode features were increased to a 2.0mm pitch with 0.80mm struts (2 full perimeters with 0.4mm nozzle) anchored to the 0.24mm solid white floor.
+6. **Verification**:
+   - All unit tests and topological manifold verifications pass with 0 open edges and 0 non-manifold edges across all modes and AMS slot STLs.
+
 ---
 
 ## 3. Current State & Analysis of the Latest Physical Print

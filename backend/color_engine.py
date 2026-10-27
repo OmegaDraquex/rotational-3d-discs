@@ -95,7 +95,7 @@ def get_default_cmyw_palette(num_colors: int = 4) -> List[Dict[str, Any]]:
         ("#E61919", "Slot 5: Scarlet Red"),
         ("#1A56DB", "Slot 6: Cobalt Blue"),
         ("#10B981", "Slot 7: Emerald Green"),
-        ("#1E293B", "Slot 8: Charcoal Black"),
+        ("#7E22CE", "Slot 8: Royal Purple"),
     ]
     palette = []
     for idx in range(k):
@@ -195,11 +195,15 @@ def optimize_palette_for_images(
     for j in range(num_active):
         abs_dir = centers[j]
         max_comp = float(np.max(abs_dir)) + 1e-6
-        scaled_abs = np.clip((abs_dir / max_comp) * 0.90, 0.0, 0.94)
+        # Scale absorption so transmittance is >= 0.18 (translucent chromatic optical filter)
+        # Prevents selecting dead-opaque Charcoal Black that permanently blocks light rays
+        scaled_abs = np.clip((abs_dir / max_comp) * 0.80, 0.0, 0.82)
         # Filament RGB transmittance at full thickness
-        fil_rgb = np.clip(1.0 - scaled_abs, 0.04, 1.0)
+        fil_rgb = np.clip(1.0 - scaled_abs, 0.18, 1.0)
         hx = rgb01_to_hex(fil_rgb)
         fname = closest_filament_name(hx)
+        if "Black" in fname:
+            fname = "Deep Slate"
         palette.append({
             "slot": j + 2,
             "hex": hx,
@@ -279,28 +283,28 @@ def _project_density_to_palette(
     ak_norm_sq_map = np.sum(chosen_abs ** 2, axis=-1) + 1e-6
     u_map = np.clip(np.sum(disc_density_rgb * chosen_abs, axis=-1) / ak_norm_sq_map, 0.0, 0.58)
 
+    base_skin_mm = 0.24
     if mode == "holes":
-        # In Holes mode, pixels with low density (u < 0.22) become open through-holes (0.0 mm),
+        # In Holes mode, pixels with low density (u < 0.21) become apertures (0.24 mm base skin in Slot 1),
         # while higher-density pixels become solid colored blocks of thickness t_max!
         is_hole = (u_map < 0.21) & active_circle
-        thickness_mm = np.where(is_hole, 0.0, t_max).astype(np.float32)
+        thickness_mm = np.where(is_hole, base_skin_mm, t_max).astype(np.float32)
         u_eff = np.where(is_hole, 0.0, 0.42).astype(np.float32)
-        slot_map[is_hole] = 0  # 0 indicates open hole
+        slot_map[is_hole] = 1  # Continuous White base skin
         rim_thickness = t_max
     elif mode == "halftone":
         # Halftone Photo Mode: variable-aperture micro-screen with connected grid backbone
         yy, xx = np.mgrid[:h, :w]
-        phase = 1.0 if is_back_disc else 0.0
-        wx = np.cos(2.0 * math.pi * (xx - w / 2.0 + phase) / 4.0)
-        wy = np.cos(2.0 * math.pi * (yy - h / 2.0 + phase) / 4.0)
-        screen = 0.50 + 0.38 * (0.5 * (wx + wy))
-        strut_grid = ((xx % 4 == 0) | (yy % 4 == 0)) & active_circle
+        phase = 1.25 if is_back_disc else 0.0
+        wx = np.cos(2.0 * math.pi * (xx - w / 2.0 + phase) / 5.0)
+        wy = np.cos(2.0 * math.pi * (yy - h / 2.0 + phase) / 5.0)
+        screen = 0.50 + 0.35 * (0.5 * (wx + wy))
+        strut_grid = ((xx % 5 < 2) | (yy % 5 < 2)) & active_circle
         op = np.clip((u_map / 0.54) * (1.12 if is_back_disc else 1.0), 0.0, 1.0)
         is_solid = ((op >= screen) | strut_grid) & active_circle
-        is_hole = (~is_solid) & active_circle
-        thickness_mm = np.where(is_solid, np.clip(0.45 + op * (t_max - 0.45), 0.45, t_max), 0.0).astype(np.float32)
-        u_eff = np.where(is_hole, 0.0, u_map * (1.15 if is_back_disc else 1.0)).astype(np.float32)
-        slot_map[is_hole] = 0
+        thickness_mm = np.where(is_solid, np.clip(0.48 + op * (t_max - 0.48), 0.48, t_max), base_skin_mm).astype(np.float32)
+        u_eff = np.where(~is_solid, 0.04, u_map * (1.15 if is_back_disc else 1.0)).astype(np.float32)
+        slot_map[~is_solid] = 1  # Continuous White base skin in aperture valleys
         rim_thickness = max(1.2, t_max)
     else:
         # Asymmetric Back-to-Front Optical Compensation:
